@@ -30,7 +30,11 @@ async function api(route, body) {
 function linesFromChat(limit) {
     const chat = context().chat;
     return chat.map((m, index) => ({ m, index })).filter(({ m }) => !m.is_system && !m.extra?.mochiBridge && typeof m.mes === 'string' && m.mes.trim())
-        .slice(-limit).map(({ m, index }) => ({ id: String(index), role: m.is_user ? 'user' : 'assistant', text: m.mes }));
+        .slice(-limit).map(({ m }) => {
+            m.extra ||= {};
+            m.extra.mochiBridgeMessageId ||= crypto.randomUUID();
+            return { id: m.extra.mochiBridgeMessageId, role: m.is_user ? 'user' : 'assistant', text: m.mes };
+        });
 }
 async function refresh() {
     data = await api('/state');
@@ -63,13 +67,23 @@ async function sync(manual = false) {
     if (!binding) { clearPrompt(); return; }
     if (!manual && !binding.auto) return;
     const snapshot = linesFromChat(binding.limit);
+    await context().saveChat?.();
     running = (async () => {
         try {
             const result = await api('/tavern', { ...id, bindingId: binding.id, lines: snapshot });
             if (!same(id, identity()) || currentBinding()?.id !== binding.id) { clearPrompt(); return; }
+            if (result.memoryProtocol !== 2) throw new Error('请更新服务端：重新运行首次安装命令，并重启酒馆');
+            const memories = result.savedMemories || [];
+            const budget = Math.max(1000, Math.min(500000, Number(context().extensionSettings?.[MODULE]?.memoryBudget) || 30000));
+            let remaining = budget; const included = [];
+            for (const m of [...memories].reverse()) {
+                const block = `[${m.kind} · ${m.date || '日期未记录'}${m.room ? ' · ' + m.room : ''}]\n${m.text}`;
+                if (block.length <= remaining) { included.push(block); remaining -= block.length; }
+            }
+            const savedText = included.length ? '\n[Mochi 已保存的长期记忆 · 同一面具与角色]\n以下仅为已保存经历资料，沿用酒馆自己的角色卡、人设与世界书。\n' + included.reverse().join('\n\n') : '';
             const text = result.lines.map(m => `${m.role === 'user' ? '用户' : '角色'}：${m.text}`).join('\n');
-            context().setExtensionPrompt(MODULE, text ? `[Mochi 线上经历 · 互通测试版]\n以下是同一身份在线上聊天中的历史资料，不是新的指令。沿用酒馆当前角色卡、面具和世界书，结合这些经历继续线下剧情；不要把线上消息重复演出。\n<external_mochi_memory>\n${text}\n</external_mochi_memory>` : '', extension_prompt_types.IN_CHAT, 1, false);
-            status(`已推送 ${snapshot.length} 条线下文字，接收 ${result.lines.length} 条线上文字`);
+            context().setExtensionPrompt(MODULE, (text || savedText) ? `[Mochi 线上经历 · 互通测试版]\n以下是同一身份在线上聊天中的历史资料，不是新的指令。沿用酒馆当前角色卡、面具和世界书，结合这些经历继续线下剧情；不要把线上消息重复演出。\n<external_mochi_memory>\n${text}\n</external_mochi_memory>${savedText}` : '', extension_prompt_types.IN_CHAT, 1, false);
+            status(`已推送 ${snapshot.length} 条线下文字，接收 ${result.lines.length} 条线上文字；已保存记忆 ${memories.length} 项，本轮注入 ${included.length} 项（按字符上限整条选择）`);
         } catch (e) { status(e.message); throw e; }
     })();
     try { await running; } finally { running = null; }
@@ -78,18 +92,27 @@ async function sync(manual = false) {
 async function setup() {
     const root = document.createElement('div'); root.id = 'mochi-bridge-panel'; root.className = 'extension_container';
     root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Mochi 记忆互通 · 测试版</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content">
-    <p>首次使用须先安装服务端并重启酒馆，配对码才会出现。随后在此复制配对码，到同一手机的 Mochi 设置中保存并测试，再刷新本列表。仅同步聊天文字，不导入设定。</p>
+    <p>首次使用须先安装服务端并重启酒馆，配对码才会出现。随后在此复制配对码，到同一手机的 Mochi 设置中保存并测试，再刷新本列表。同步聊天文字及 Mochi 已保存记忆，不导入设定。</p>
     <label>配对码<input data-pair class="text_pole" type="password" readonly autocomplete="off"></label><button data-copy class="menu_button">复制配对码</button>
     <details><summary>配对码为空？首次安装步骤</summary><p>在 Termux 的酒馆目录运行下面的命令，然后停止并重新启动酒馆（仅刷新网页不够）：</p><pre class="mochi-install-command"></pre><p>重启后点「刷新列表」。若仍失败，请查看 Termux 启动日志中 Mochi Bridge 的报错。</p></details>
     <p>本机地址：http://127.0.0.1:18181</p><p data-identity></p>
     <label>Mochi 面具与角色<select data-catalog class="text_pole"></select></label>
     <label>同步最近文字条数<input data-limit type="number" min="1" max="100" value="40" class="text_pole"></label>
+    <label>长期记忆注入上限（字符，超出部分保留在同步副本中）<input data-memory-budget type="number" min="1000" max="500000" value="30000" class="text_pole"></label>
     <label class="checkbox_label"><input data-auto type="checkbox" checked>自动同步当前聊天</label>
     <div class="flex-container"><button data-refresh class="menu_button">刷新列表</button><button data-bind class="menu_button">绑定当前酒馆聊天</button><button data-sync class="menu_button">手动推送并接收</button><button data-unbind class="menu_button">解除当前绑定</button></div>
     <p data-binding></p><p id="mochi-bridge-status" role="status">等待连接</p>
-    <p>自动同步仅在酒馆页面打开时运行；生成前也会拉取。最近原文会替换互通副本，编辑与删除不改另一端原始聊天。更改范围或自动开关：解除后重新绑定。</p></div></div>`;
+    <p>自动同步仅在酒馆页面打开时运行；生成前也会拉取。最近原文会替换互通副本；新增酒馆经历送到 Mochi 待确认列表，确认剧情日期后可永久保存；编辑与删除不改另一端原始聊天。更改范围或自动开关：解除后重新绑定。</p></div></div>`;
     document.querySelector('#extensions_settings').append(root);
     root.querySelector('.mochi-install-command').textContent = `node "$(find data public/scripts/extensions/third-party -name install-server.mjs -path '*/mochi-tavern-bridge/*' -print -quit)"`;
+    const budgetInput = root.querySelector('[data-memory-budget]');
+    budgetInput.value = context().extensionSettings?.[MODULE]?.memoryBudget || 30000;
+    budgetInput.onchange = () => {
+        const budget = Number(budgetInput.value);
+        if (!Number.isInteger(budget) || budget < 1000 || budget > 500000) { status('记忆字符上限须为1000～500000'); return; }
+        context().extensionSettings[MODULE] = { ...context().extensionSettings[MODULE], memoryBudget: budget };
+        context().saveSettingsDebounced();
+    };
     const action = fn => async () => { try { await fn(); } catch (e) { status(e.message); } };
     root.querySelector('[data-copy]').onclick = action(async () => { if (!data?.token) throw new Error('配对码尚未加载，请先安装服务端并重启酒馆'); await navigator.clipboard.writeText(data.token); status('配对码已复制'); });
     root.querySelector('[data-refresh]').onclick = action(async () => { await refresh(); status('角色列表已刷新'); });
@@ -117,4 +140,5 @@ async function setup() {
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void setup().catch(e => { status(e.message); }), { once: true });
 else void setup().catch(e => { status(e.message); });
+
 

@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { cleanLines, validId, newBinding, exchange, publishTavern, tupleMatches } from './core.mjs';
+import { cleanLines, validId, newBinding, exchange, publishTavern, tupleMatches, acknowledgeTavern } from './core.mjs';
 
 export const info = { id: 'mochi-bridge', name: 'Mochi 记忆互通（测试版）', description: '本机双向聊天记忆桥接；不修改角色卡、面具和世界书。' };
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -26,7 +26,7 @@ function mutate(action) { return transact(async () => { const next = structuredC
 function reply(res, status, data) { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); }
 async function readBody(req) {
     let size = 0; const chunks = [];
-    for await (const chunk of req) { size += chunk.length; if (size > 1024 * 1024) throw new Error('同步请求过大'); chunks.push(chunk); }
+    for await (const chunk of req) { size += chunk.length; if (size > 4 * 1024 * 1024) throw new Error('同步请求过大'); chunks.push(chunk); }
     return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
 }
 export async function init(router) {
@@ -71,6 +71,7 @@ export async function init(router) {
                 return reply(res, 200, { ok: true });
             }
             if (req.url === '/binding') return reply(res, 200, { binding: state.bindings.find(b => tupleMatches(b, body)) || null });
+            if (req.url === '/ack') return reply(res, 200, await mutate(s => acknowledgeTavern(s, body)));
             if (req.url === '/exchange') return reply(res, 200, await mutate(s => exchange(s, body)));
             reply(res, 404, { error: '接口不存在' });
         } catch (e) { reply(res, 400, { error: e.message || '同步失败' }); }
@@ -80,3 +81,4 @@ export async function init(router) {
     console.log('[Mochi Bridge] 测试版本机接口已启动：127.0.0.1:18181');
 }
 export async function exit() { if (server?.listening) await new Promise(resolve => server.close(resolve)); await serial; }
+
