@@ -1,0 +1,8 @@
+#mochi-bridge-panel { min-width: 0; width: 100%; }
+#mochi-bridge-panel .inline-drawer-content { min-width: 0; }
+#mochi-bridge-panel label:not(.checkbox_label) { display: block; width: 100%; }
+#mochi-bridge-panel .text_pole { width: 100%; box-sizing: border-box; }
+#mochi-bridge-panel .flex-container { display: flex; flex-wrap: wrap; gap: 8px; }
+#mochi-bridge-panel .menu_button { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 7em; max-width: 100%; flex: 0 1 auto; padding: 8px 12px; white-space: normal; word-break: keep-all; overflow-wrap: normal; line-height: 1.5; }
+#mochi-bridge-panel p, #mochi-bridge-status { overflow-wrap: anywhere; }
+#mochi-bridge-panel .mochi-install-command { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; font-size: .85em; }

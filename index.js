@@ -16,7 +16,16 @@ function clearPrompt() { context().setExtensionPrompt(MODULE, '', extension_prom
 function status(text) { document.querySelector('#mochi-bridge-status').textContent = text; }
 async function api(route, body) {
     const response = await fetch(`${API}${route}`, { method: body === undefined ? 'GET' : 'POST', headers: context().getRequestHeaders(), ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    const value = await response.json(); if (!response.ok) throw new Error(value.error || `酒馆接口 ${response.status}`); return value;
+    const raw = await response.text();
+    let value;
+    try { value = JSON.parse(raw); }
+    catch {
+        if (response.status === 401 || response.status === 403) throw new Error('酒馆登录或访问权限失效，请重新登录后刷新');
+        throw new Error('未读到酒馆互通服务端接口（返回了网页）。请先在 Termux 安装服务端并重启酒馆，再点「刷新列表」。仅安装网页扩展不会生成配对码。');
+    }
+    if (!response.ok) throw new Error(value.error || `酒馆接口 ${response.status}`);
+    if (route === '/state' && (typeof value.token !== 'string' || !value.token || !Array.isArray(value.catalogs) || !Array.isArray(value.bindings))) throw new Error('服务端返回的配对信息不完整，请检查插件版本并重启酒馆');
+    return value;
 }
 function linesFromChat(limit) {
     const chat = context().chat;
@@ -69,8 +78,9 @@ async function sync(manual = false) {
 async function setup() {
     const root = document.createElement('div'); root.id = 'mochi-bridge-panel'; root.className = 'extension_container';
     root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>Mochi 记忆互通 · 测试版</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content">
-    <p>先在此复制配对码，到同一手机的 Mochi 设置中保存并测试，再刷新本列表。仅同步聊天文字，不导入设定。</p>
+    <p>首次使用须先安装服务端并重启酒馆，配对码才会出现。随后在此复制配对码，到同一手机的 Mochi 设置中保存并测试，再刷新本列表。仅同步聊天文字，不导入设定。</p>
     <label>配对码<input data-pair class="text_pole" type="password" readonly autocomplete="off"></label><button data-copy class="menu_button">复制配对码</button>
+    <details><summary>配对码为空？首次安装步骤</summary><p>在 Termux 的酒馆目录运行下面的命令，然后停止并重新启动酒馆（仅刷新网页不够）：</p><pre class="mochi-install-command"></pre><p>重启后点「刷新列表」。若仍失败，请查看 Termux 启动日志中 Mochi Bridge 的报错。</p></details>
     <p>本机地址：http://127.0.0.1:18181</p><p data-identity></p>
     <label>Mochi 面具与角色<select data-catalog class="text_pole"></select></label>
     <label>同步最近文字条数<input data-limit type="number" min="1" max="100" value="40" class="text_pole"></label>
@@ -79,8 +89,9 @@ async function setup() {
     <p data-binding></p><p id="mochi-bridge-status" role="status">等待连接</p>
     <p>自动同步仅在酒馆页面打开时运行；生成前也会拉取。最近原文会替换互通副本，编辑与删除不改另一端原始聊天。更改范围或自动开关：解除后重新绑定。</p></div></div>`;
     document.querySelector('#extensions_settings').append(root);
+    root.querySelector('.mochi-install-command').textContent = `node "$(find data public/scripts/extensions/third-party -name install-server.mjs -path '*/mochi-tavern-bridge/*' -print -quit)"`;
     const action = fn => async () => { try { await fn(); } catch (e) { status(e.message); } };
-    root.querySelector('[data-copy]').onclick = action(async () => { await navigator.clipboard.writeText(data.token); status('配对码已复制'); });
+    root.querySelector('[data-copy]').onclick = action(async () => { if (!data?.token) throw new Error('配对码尚未加载，请先安装服务端并重启酒馆'); await navigator.clipboard.writeText(data.token); status('配对码已复制'); });
     root.querySelector('[data-refresh]').onclick = action(async () => { await refresh(); status('角色列表已刷新'); });
     root.querySelector('[data-bind]').onclick = action(async () => {
         const id = identity(); if (!id) throw new Error('请先选择单人聊天和面具');
@@ -104,5 +115,6 @@ async function setup() {
     }, 15000);
     await refresh(); await sync();
 }
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void setup().catch(console.error), { once: true });
-else void setup().catch(console.error);
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void setup().catch(e => { status(e.message); }), { once: true });
+else void setup().catch(e => { status(e.message); });
+
