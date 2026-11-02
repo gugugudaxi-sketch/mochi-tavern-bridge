@@ -1,0 +1,11 @@
+{
+  "display_name": "Mochi 记忆互通（测试版）",
+  "loading_order": 50,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "author": "Mochi personal edition",
+  "version": "0.1.0-beta",
+  "auto_update": false,
+  "homePage": "https://github.com/gugugudaxi-sketch/mochi-tavern-bridge"
+}
