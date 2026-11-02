@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { cleanLines, validId, newBinding, exchange, publishTavern, tupleMatches, acknowledgeTavern } from './core.mjs';
+import { cleanLines, validId, newBinding, exchange, publishTavern, tupleMatches, acknowledgeTavern, updateBindingSettings } from './core.mjs';
 
 export const info = { id: 'mochi-bridge', name: 'Mochi 记忆互通（测试版）', description: '本机双向聊天记忆桥接；不修改角色卡、面具和世界书。' };
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -49,6 +49,7 @@ export async function init(router) {
         catch { res.status(500).json({ error: '无法保存配对信息' }); }
     });
     router.post('/bind', async (req, res) => { try { const binding = await mutate(s => { s.owner ||= req.mochiOwner; return newBinding(s, req.body); }); res.json({ binding }); } catch (e) { res.status(400).json({ error: e.message }); } });
+    router.post('/binding-settings', async (req, res) => { try { res.json({ binding: await mutate(s => updateBindingSettings(s, req.body)) }); } catch (e) { res.status(400).json({ error: e.message }); } });
     router.post('/unbind', async (req, res) => { try { await mutate(s => { s.bindings = s.bindings.filter(b => b.id !== req.body.id); delete s.memories[req.body.id]; }); res.json({ ok: true }); } catch { res.status(500).json({ error: '解除绑定失败' }); } });
     router.post('/tavern', async (req, res) => { try { res.json(await mutate(s => publishTavern(s, req.body))); } catch (e) { res.status(400).json({ error: e.message }); } });
     // Separate loopback-only listener: native APK does not borrow the browser's ST session or disable ST CSRF.
@@ -81,4 +82,5 @@ export async function init(router) {
     console.log('[Mochi Bridge] 测试版本机接口已启动：127.0.0.1:18181');
 }
 export async function exit() { if (server?.listening) await new Promise(resolve => server.close(resolve)); await serial; }
+
 

@@ -4,6 +4,8 @@ const MODULE = 'mochi-memory-bridge';
 const API = '/api/plugins/mochi-bridge';
 let data = null;
 let running = null;
+let settingsDirty = false;
+let displayedBindingId = null;
 const context = () => SillyTavern.getContext();
 const identity = () => {
     const c = context();
@@ -21,6 +23,7 @@ async function api(route, body) {
     try { value = JSON.parse(raw); }
     catch {
         if (response.status === 401 || response.status === 403) throw new Error('酒馆登录或访问权限失效，请重新登录后刷新');
+        if (route === '/binding-settings') throw new Error('服务端尚不支持直接保存设置：更新扩展后重跑一次服务端安装命令并重启酒馆，无需解绑');
         throw new Error('未读到酒馆互通服务端接口（返回了网页）。请先在 Termux 安装服务端并重启酒馆，再点「刷新列表」。仅安装网页扩展不会生成配对码。');
     }
     if (!response.ok) throw new Error(value.error || `酒馆接口 ${response.status}`);
@@ -53,6 +56,14 @@ async function refresh() {
     panel.querySelector('[data-identity]').textContent = id ? `当前绑定目标：${context().name1} / ${context().name2} / ${id.chatId}` : '请打开单人聊天，并选择正确的酒馆面具';
     const binding = currentBinding();
     panel.querySelector('[data-binding]').textContent = binding ? `已绑定：${binding.label} · 最近 ${binding.limit} 条 · 自动${binding.auto ? '开启' : '关闭'}` : '当前聊天未绑定';
+    if (!settingsDirty || displayedBindingId !== (binding?.id || null)) {
+        panel.querySelector('[data-limit]').value = binding?.limit || 40;
+        panel.querySelector('[data-auto]').checked = binding ? binding.auto : true;
+        panel.querySelector('[data-memory-budget]').value = context().extensionSettings?.[MODULE]?.memoryBudget || 30000;
+        settingsDirty = false;
+        panel.querySelector('[data-settings-state]').textContent = binding ? '当前显示的是已保存设置' : '填写后绑定当前聊天';
+    }
+    displayedBindingId = binding?.id || null;
     clearPrompt();
 }
 async function sync(manual = false) {
@@ -100,22 +111,49 @@ async function setup() {
     <label>同步最近文字条数<input data-limit type="number" min="1" max="100" value="40" class="text_pole"></label>
     <label>长期记忆注入上限（字符，超出部分保留在同步副本中）<input data-memory-budget type="number" min="1000" max="500000" value="30000" class="text_pole"></label>
     <label class="checkbox_label"><input data-auto type="checkbox" checked>自动同步当前聊天</label>
-    <div class="flex-container"><button data-refresh class="menu_button">刷新列表</button><button data-bind class="menu_button">绑定当前酒馆聊天</button><button data-sync class="menu_button">手动推送并接收</button><button data-unbind class="menu_button">解除当前绑定</button></div>
+    <div class="flex-container"><button data-refresh class="menu_button">刷新列表</button><button data-bind class="menu_button">绑定当前酒馆聊天</button><button data-save-settings class="menu_button">保存当前设置</button><button data-sync class="menu_button">手动推送并接收</button><button data-unbind class="menu_button">解除当前绑定</button></div>
+    <p data-settings-state role="status">设置尚未加载</p>
     <p data-binding></p><p id="mochi-bridge-status" role="status">等待连接</p>
-    <p>自动同步仅在酒馆页面打开时运行；生成前也会拉取。最近原文会替换互通副本；新增酒馆经历送到 Mochi 待确认列表，确认剧情日期后可永久保存；编辑与删除不改另一端原始聊天。更改范围或自动开关：解除后重新绑定。</p></div></div>`;
+    <p>自动同步仅在酒馆页面打开时运行；生成前也会拉取。最近原文会替换互通副本；新增酒馆经历送到 Mochi 待确认列表，确认剧情日期后可永久保存；编辑与删除不改另一端原始聊天。调整条数、自动开关或记忆字符上限后，点「保存当前设置」，无需解除绑定。</p></div></div>`;
     document.querySelector('#extensions_settings').append(root);
     root.querySelector('.mochi-install-command').textContent = `node "$(find data public/scripts/extensions/third-party -name install-server.mjs -path '*/mochi-tavern-bridge/*' -print -quit)"`;
     const budgetInput = root.querySelector('[data-memory-budget]');
     budgetInput.value = context().extensionSettings?.[MODULE]?.memoryBudget || 30000;
-    budgetInput.onchange = () => {
-        const budget = Number(budgetInput.value);
-        if (!Number.isInteger(budget) || budget < 1000 || budget > 500000) { status('记忆字符上限须为1000～500000'); return; }
-        context().extensionSettings[MODULE] = { ...context().extensionSettings[MODULE], memoryBudget: budget };
-        context().saveSettingsDebounced();
+    const markDirty = () => {
+        settingsDirty = true;
+        root.querySelector('[data-settings-state]').textContent = '有未保存修改，请点「保存当前设置」；当前仍按已保存设置运行';
     };
+    budgetInput.oninput = markDirty;
+    root.querySelector('[data-limit]').oninput = markDirty;
+    root.querySelector('[data-auto]').onchange = markDirty;
     const action = fn => async () => { try { await fn(); } catch (e) { status(e.message); } };
     root.querySelector('[data-copy]').onclick = action(async () => { if (!data?.token) throw new Error('配对码尚未加载，请先安装服务端并重启酒馆'); await navigator.clipboard.writeText(data.token); status('配对码已复制'); });
     root.querySelector('[data-refresh]').onclick = action(async () => { await refresh(); status('角色列表已刷新'); });
+    root.querySelector('[data-save-settings]').onclick = action(async () => {
+        const button = root.querySelector('[data-save-settings]');
+        if (button.disabled) return;
+        const limit = Number(root.querySelector('[data-limit]').value);
+        const budget = Number(budgetInput.value);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('同步条数须为1～100整数，设置尚未保存');
+        if (!Number.isInteger(budget) || budget < 1000 || budget > 500000) throw new Error('记忆字符上限须为1000～500000，设置尚未保存');
+        const id = identity(); const binding = currentBinding();
+        const automatic = root.querySelector('[data-auto]').checked;
+        button.disabled = true;
+        try {
+            if (binding) {
+                const response = await api('/binding-settings', { ...id, bindingId: binding.id, limit, auto: automatic });
+                const index = data.bindings.findIndex(b => b.id === binding.id);
+                if (index >= 0) data.bindings[index] = response.binding;
+            }
+            context().extensionSettings[MODULE] = { ...context().extensionSettings[MODULE], memoryBudget: budget };
+            context().saveSettingsDebounced();
+            if (same(id, identity()) || (!id && !identity())) {
+                settingsDirty = false;
+                await refresh();
+                status(binding ? `已保存：最近 ${limit} 条，自动同步${automatic ? '开启' : '关闭'}；原绑定及同步记录保留。下次同步生效。` : '已保存记忆字符上限；当前聊天尚未绑定');
+            }
+        } finally { button.disabled = false; }
+    });
     root.querySelector('[data-bind]').onclick = action(async () => {
         const id = identity(); if (!id) throw new Error('请先选择单人聊天和面具');
         const value = root.querySelector('[data-catalog]').value; if (!value) throw new Error('请先在 Mochi 保存连接，等待角色列表上传后刷新');
@@ -140,5 +178,6 @@ async function setup() {
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void setup().catch(e => { status(e.message); }), { once: true });
 else void setup().catch(e => { status(e.message); });
+
 
 

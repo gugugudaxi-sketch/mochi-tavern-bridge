@@ -41,8 +41,15 @@ test('实际本机HTTP：认证、配对、双向同步、持久化、解除绑�
         const back = await call('/exchange', { ...identity, bindingId: binding.id, lines }); assert.equal(back.data.lines[0].text, '我来接你了');
         const disk = JSON.parse(await fs.readFile(path.join(temporary, 'bridge-state.json'), 'utf8')); assert.deepEqual(disk.memories[binding.id].mochi, lines);
         assert.equal((await call('/exchange', { ...identity, maskId: 'wrong', bindingId: binding.id, lines })).code, 400);
+        const beforeSettings = JSON.parse(await fs.readFile(path.join(temporary, 'bridge-state.json'), 'utf8'));
+        const changed = await admin('POST', '/binding-settings', { bindingId: binding.id, avatar: binding.avatar, persona: binding.persona, chatId: binding.chatId, limit: 100, auto: false });
+        assert.equal(changed.code, 200); assert.equal(changed.data.binding.id, binding.id); assert.equal(changed.data.binding.limit, 100);
+        const afterSettings = JSON.parse(await fs.readFile(path.join(temporary, 'bridge-state.json'), 'utf8'));
+        assert.deepEqual(afterSettings.memories, beforeSettings.memories);
+        assert.equal((await call('/binding', identity)).data.binding.auto, false);
         await admin('POST', '/unbind', { id: binding.id });
         assert.equal((await call('/binding', identity)).data.binding, null);
         assert.equal((await call('/exchange', { ...identity, bindingId: binding.id, lines })).code, 400);
     } finally { await plugin.exit(); await fs.rm(temporary, { recursive: true, force: true }); }
 });
+

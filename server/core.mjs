@@ -72,3 +72,15 @@ export function acknowledgeTavern(state, input) {
     for (const receipt of input.receipts) if (log[receipt.id]?.revision === receipt.revision) log[receipt.id].acknowledged = true;
     return { ok: true };
 }
+
+
+/** Change only mutable settings; identity, receipts and saved memory remain untouched. */
+export function updateBindingSettings(state, input) {
+    const binding = state.bindings.find(b => b.id === input.bindingId && tavernMatches(b, input));
+    if (!binding) throw new Error('当前面具、角色或聊天记录与绑定不符，请刷新列表');
+    if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100) throw new Error('同步范围须为1～100条整数');
+    if (typeof input.auto !== 'boolean') throw new Error('自动同步设置无效');
+    binding.limit = input.limit;
+    binding.auto = input.auto;
+    return binding;
+}
