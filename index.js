@@ -23,6 +23,7 @@ async function api(route, body) {
     try { value = JSON.parse(raw); }
     catch {
         if (response.status === 401 || response.status === 403) throw new Error('酒馆登录或访问权限失效，请重新登录后刷新');
+        if (route === '/tavern-batch') throw new Error('服务端不支持自动分批，请更新扩展并重跑服务端安装命令后重启酒馆');
         if (route === '/binding-settings') throw new Error('服务端尚不支持直接保存设置：更新扩展后重跑一次服务端安装命令并重启酒馆，无需解绑');
         throw new Error('未读到酒馆互通服务端接口（返回了网页）。请先在 Termux 安装服务端并重启酒馆，再点「刷新列表」。仅安装网页扩展不会生成配对码。');
     }
@@ -38,6 +39,46 @@ function linesFromChat(limit) {
             m.extra.mochiBridgeMessageId ||= crypto.randomUUID();
             return { id: m.extra.mochiBridgeMessageId, role: m.is_user ? 'user' : 'assistant', text: m.mes };
         });
+}
+function createTavernUploadPlan(lines) {
+    const messages = [], batches = []; let packet = [], size = 0;
+    for (const line of lines) {
+        const parts = [];
+        for (let start = 0; start < line.text.length;) {
+            let end = Math.min(start + 48000, line.text.length);
+            // Do not split an emoji's UTF-16 surrogate pair.
+            if (end < line.text.length && /[\uD800-\uDBFF]/.test(line.text[end - 1])) end--;
+            parts.push(line.text.slice(start, end)); start = end;
+        }
+        if (!parts.length) parts.push('');
+        messages.push({ id: line.id, role: line.role, length: line.text.length, parts: parts.length });
+        parts.forEach((text, part) => {
+            if (size + text.length > 48000 || packet.length >= 100) { batches.push(packet); packet = []; size = 0; }
+            packet.push({ id: line.id, part, text }); size += text.length;
+        });
+    }
+    if (packet.length) batches.push(packet);
+    return { messages, batches };
+}
+async function pushTavernSnapshot(id, bindingId, lines) {
+    if (lines.reduce((n, l) => n + l.text.length, 0) <= 60000) return api('/tavern', { ...id, bindingId, lines });
+    const plan = createTavernUploadPlan(lines);
+    const base = { ...id, bindingId, uploadId: crypto.randomUUID() };
+    const send = async body => {
+        let error;
+        // Repeated packets/commits are idempotent; retry transport failures, never rejected data.
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try { return await api('/tavern-batch', { ...base, ...body }); }
+            catch (e) { error = e; if (!(e instanceof TypeError)) throw e; }
+        }
+        throw error;
+    };
+    await send({ action: 'start', messages: plan.messages });
+    for (let i = 0; i < plan.batches.length; i++) {
+        status(`正在上传酒馆原文：第 ${i + 1}/${plan.batches.length} 批，收齐后才提交`);
+        await send({ action: 'part', pieces: plan.batches[i] });
+    }
+    return send({ action: 'commit' });
 }
 async function refresh() {
     data = await api('/state');
@@ -81,7 +122,7 @@ async function sync(manual = false) {
     await context().saveChat?.();
     running = (async () => {
         try {
-            const result = await api('/tavern', { ...id, bindingId: binding.id, lines: snapshot });
+            const result = await pushTavernSnapshot(id, binding.id, snapshot);
             if (!same(id, identity()) || currentBinding()?.id !== binding.id) { clearPrompt(); return; }
             if (result.memoryProtocol !== 2) throw new Error('请更新服务端：重新运行首次安装命令，并重启酒馆');
             const memories = result.savedMemories || [];
@@ -178,6 +219,7 @@ async function setup() {
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void setup().catch(e => { status(e.message); }), { once: true });
 else void setup().catch(e => { status(e.message); });
+
 
 
 

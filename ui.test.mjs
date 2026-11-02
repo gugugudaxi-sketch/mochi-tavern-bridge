@@ -83,3 +83,36 @@ test('直接保存100条与关闭自动同步，不解绑；非法数值不发�
     const before = exchanges; await vm.runInContext('sync()', sandbox); assert.equal(exchanges, before); await vm.runInContext('sync(true)', sandbox); assert.equal(exchanges, before + 1);
     dom.window.close();
 });
+
+
+test('实际前端自动分批长原文，与服务端联合验证原文还原及丢响应重试去重', async () => {
+    const { newBinding, acceptTavernBatch, exchange } = await import('./server/core.mjs');
+    const state = { catalogs: [{ deviceId: 'd', maskId: 'm', characters: [{ id: 'c' }] }], bindings: [], memories: {} };
+    const binding = newBinding(state, { deviceId: 'd', maskId: 'm', charId: 'c', avatar: 'a', persona: 'p', chatId: 'chat', limit: 100, auto: false });
+    const dom = new JSDOM('<div id="extensions_settings"></div>');
+    let requests = 0, lostCommit = false;
+    const c = { characterId: 0, characters: [{ avatar: 'a' }], chatId: 'chat', chat: [], getRequestHeaders: () => ({}), extensionSettings: {}, setExtensionPrompt() {}, eventTypes: { CHAT_CHANGED: 'chat', GENERATION_AFTER_COMMANDS: 'gen' }, eventSource: { on() {} } };
+    const sandbox = { document: dom.window.document, navigator: {}, crypto: globalThis.crypto, TypeError: globalThis.TypeError, console, setInterval: () => 1, user_avatar: 'p', extension_prompt_types: { IN_CHAT: 1 }, SillyTavern: { getContext: () => c }, fetch: async (url, options) => {
+        let value;
+        if (url.endsWith('/state')) value = { token: 'token', catalogs: [], bindings: [binding] };
+        else if (url.endsWith('/tavern-batch')) {
+            requests++; const body = JSON.parse(options.body);
+            if (body.action === 'part') assert.ok(body.pieces.reduce((n, p) => n + p.text.length, 0) <= 50000);
+            value = acceptTavernBatch(state, body);
+            if (body.action === 'commit' && !lostCommit) { lostCommit = true; throw new TypeError('Network response lost'); }
+        } else throw new Error('长原文不应走普通上传接口');
+        return { ok: true, status: 200, text: async () => JSON.stringify(value) };
+    } };
+    vm.createContext(sandbox); vm.runInContext((await fs.readFile(new URL('index.js', import.meta.url), 'utf8')).replace(/^import[^\n]+\n/, ''), sandbox);
+    dom.window.document.dispatchEvent(new dom.window.Event('DOMContentLoaded'));
+    for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r));
+    const original = '字'.repeat(47999) + '😀' + '剧情'.repeat(50000);
+    sandbox.testLines = [{ id: 'long', role: 'assistant', text: original }]; sandbox.testBinding = binding.id;
+    const plan = vm.runInContext('createTavernUploadPlan(testLines)', sandbox);
+    assert.ok(plan.batches.length > 1);
+    for (const batch of plan.batches) for (const piece of batch) assert.ok(!/[\uD800-\uDBFF]$/.test(piece.text));
+    await vm.runInContext('pushTavernSnapshot(identity(), testBinding, testLines)', sandbox);
+    assert.ok(requests > plan.batches.length + 2); assert.equal(state.memories[binding.id].tavern[0].text, original);
+    assert.equal(exchange(state, { ...binding, bindingId: binding.id, lines: [] }).pending.length, 1);
+    dom.window.close();
+});

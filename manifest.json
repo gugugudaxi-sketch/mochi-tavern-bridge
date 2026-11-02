@@ -5,7 +5,7 @@
   "optional": [],
   "js": "index.js",
   "author": "Mochi personal edition",
-  "version": "0.2.1-beta",
+  "version": "0.2.2-beta",
   "auto_update": false,
   "homePage": "https://github.com/gugugudaxi-sketch/mochi-tavern-bridge",
   "css": "style.css"

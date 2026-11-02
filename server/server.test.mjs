@@ -41,6 +41,12 @@ test('实际本机HTTP：认证、配对、双向同步、持久化、解除绑�
         const back = await call('/exchange', { ...identity, bindingId: binding.id, lines }); assert.equal(back.data.lines[0].text, '我来接你了');
         const disk = JSON.parse(await fs.readFile(path.join(temporary, 'bridge-state.json'), 'utf8')); assert.deepEqual(disk.memories[binding.id].mochi, lines);
         assert.equal((await call('/exchange', { ...identity, maskId: 'wrong', bindingId: binding.id, lines })).code, 400);
+        const batchIdentity = { bindingId: binding.id, avatar: binding.avatar, persona: binding.persona, chatId: binding.chatId, uploadId: 'http-batch-test' };
+        const original = '长'.repeat(70000);
+        assert.equal((await admin('POST', '/tavern-batch', { ...batchIdentity, action: 'start', messages: [{ id: 'http-long', role: 'assistant', length: original.length, parts: 2 }] })).code, 200);
+        for (let part = 0; part < 2; part++) assert.equal((await admin('POST', '/tavern-batch', { ...batchIdentity, action: 'part', pieces: [{ id: 'http-long', part, text: original.slice(part * 35000, (part + 1) * 35000) }] })).code, 200);
+        assert.equal((await admin('POST', '/tavern-batch', { ...batchIdentity, action: 'commit' })).code, 200);
+        assert.equal((await call('/exchange', { ...identity, bindingId: binding.id, lines })).data.lines[0].text, original);
         const beforeSettings = JSON.parse(await fs.readFile(path.join(temporary, 'bridge-state.json'), 'utf8'));
         const changed = await admin('POST', '/binding-settings', { bindingId: binding.id, avatar: binding.avatar, persona: binding.persona, chatId: binding.chatId, limit: 100, auto: false });
         assert.equal(changed.code, 200); assert.equal(changed.data.binding.id, binding.id); assert.equal(changed.data.binding.limit, 100);
@@ -52,4 +58,5 @@ test('实际本机HTTP：认证、配对、双向同步、持久化、解除绑�
         assert.equal((await call('/exchange', { ...identity, bindingId: binding.id, lines })).code, 400);
     } finally { await plugin.exit(); await fs.rm(temporary, { recursive: true, force: true }); }
 });
+
 
