@@ -1,5 +1,45 @@
 import { createHash, randomUUID } from 'node:crypto';
 
+function parseRemovalRules(value = '') {
+    if (typeof value !== 'string' || value.length > 8000) throw new Error('清除格式最多8000字符');
+    const rows = value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (rows.length > 50) throw new Error('清除格式最多50项');
+    return rows.map(row => {
+        const match = row.match(/^<([\w:-]+)>\s*<\/\1>$/);
+        if (!match) throw new Error('每行填写一对标签，例如 <disclaimer></disclaimer>');
+        return match[1].toLowerCase();
+    });
+}
+function cleanStoryText(text, rules = '') {
+    const names = new Set(parseRemovalRules(rules));
+    if (!names.size) return text;
+    // A stack handles nested tags, attributes and missing opening/closing tags.
+    // Never guess that the entire prefix belongs to an orphan closing tag.
+    const tokens = /<\s*(\/?)\s*([\w:-]+)\b[^>]*>/g;
+    const ranges = []; const stack = []; let match;
+    while ((match = tokens.exec(text))) {
+        const name = match[2].toLowerCase(); if (!names.has(name)) continue;
+        if (!match[1]) { if (!/\/\s*>$/.test(match[0])) stack.push({ name, start: match.index }); else ranges.push([match.index, tokens.lastIndex]); }
+        else {
+            let i = stack.length - 1; while (i >= 0 && stack[i].name !== name) i--;
+            if (i >= 0) { const start = stack[i].start; stack.splice(i); ranges.push([start, tokens.lastIndex]); }
+            else if (!stack.length) {
+                // A known malformed disclaimer may start with <> instead of <disclaimer>.
+                const marker = name === 'disclaimer' ? text.lastIndexOf('CONTENT AUTHORIZATION PROTOCOL MAINTAINED:', match.index) : -1;
+                let start = match.index;
+                if (marker >= 0) { start = marker; const prefix = text.slice(0, marker); const malformed = prefix.match(/<>\s*$/); if (malformed) start = malformed.index; }
+                ranges.push([start, tokens.lastIndex]);
+            }
+        }
+    }
+    if (stack.length) ranges.push([stack[0].start, text.length]);
+    ranges.sort((a,b) => a[0]-b[0]); let end = 0, output = '';
+    for (const [a,b] of ranges) { if (a > end) output += text.slice(end,a); end = Math.max(end,b); }
+    output += text.slice(end); return output.trim();
+}
+
+export { parseRemovalRules, cleanStoryText };
+
 export function cleanLines(value, limit = 100, maxChars = 60000) {
     if (!Array.isArray(value) || value.length > 100) throw new Error('消息范围无效');
     let size = 0;
@@ -25,6 +65,7 @@ export function newBinding(state, input) {
     if (state.bindings.some(b => tupleMatches(b, input) || tavernMatches(b, input))) throw new Error('这组身份已绑定，请先解除原绑定');
     if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100) throw new Error('同步范围须为 1～100 条');
     const binding = { id: randomUUID(), deviceId: input.deviceId, maskId: input.maskId, charId: input.charId, avatar: input.avatar, persona: input.persona, chatId: input.chatId, label: String(input.label || input.chatId).slice(0, 200), auto: input.auto === true, limit: input.limit };
+    applyOptions(binding, input);
     state.bindings.push(binding); return binding;
 }
 export function exchange(state, input) {
@@ -33,25 +74,26 @@ export function exchange(state, input) {
     const lines = cleanLines(input.lines, binding.limit);
     const memory = state.memories[binding.id] ||= { mochi: [], tavern: [] };
     const saved = input.savedMemories === undefined ? memory.savedMemories || [] : cleanSavedMemories(input.savedMemories);
+    if (input.timeContext !== undefined) memory.timeContext = cleanTimeContext(input.timeContext);
     memory.mochi = lines; memory.savedMemories = saved;
-    return { memoryProtocol: 2, bindingId: binding.id, lines: memory.tavern, pending: Object.values(memory.tavernLog || {}).filter(l => !l.acknowledged).map(({ acknowledged, ...line }) => line) };
+    return { memoryProtocol: 2, bindingId: binding.id, lines: (memory.tavern || []).filter(l => l.text.trim()), pending: Object.values(memory.tavernLog || {}).filter(l => !l.acknowledged).map(({ acknowledged, ...line }) => line) };
 }
 export function publishTavern(state, input, largeBatch = false) {
     const binding = state.bindings.find(b => b.id === input.bindingId && tavernMatches(b, input));
     if (!binding) throw new Error('当前面具、角色或聊天记录与绑定不符');
     const memory = state.memories[binding.id] ||= { mochi: [], tavern: [] };
-    const lines = cleanLines(input.lines, binding.limit, largeBatch ? 2000000 : 60000);
+    const lines = cleanLines(input.lines, binding.limit, largeBatch ? 2000000 : 60000).map(l => ({ ...l, text: cleanStoryText(l.text, binding.removalRules || '') }));
     const log = { ...(memory.tavernLog || {}) };
     for (const line of lines) {
         const revision = createHash('sha256').update(JSON.stringify([line.role, line.text])).digest('hex');
-        if (log[line.id]?.revision !== revision) log[line.id] = { ...line, revision, acknowledged: false };
+        if (log[line.id]?.revision !== revision) log[line.id] = { ...line, revision, acknowledged: false, ...(log[line.id] && memory.removalRules !== (binding.removalRules || '') ? { repair: true } : {}) };
     }
     const currentIds = new Set(lines.map(l => l.id));
     for (const [id, item] of Object.entries(log)) if (Object.keys(log).length > 10000 && item.acknowledged && !currentIds.has(id)) delete log[id];
     if (Object.values(log).filter(l => !l.acknowledged).reduce((n, l) => n + l.text.length, 0) > 2000000) throw new Error('待接收原文超过200万字符，请先打开 Mochi 接收');
     if (Object.keys(log).length > 10000) throw new Error('酒馆待存档记录已达上限，请先在 Mochi 接收处理');
-    memory.tavern = lines; memory.tavernLog = log;
-    return { memoryProtocol: 2, bindingId: binding.id, lines: memory.mochi, savedMemories: memory.savedMemories || [] };
+    memory.tavern = lines; memory.tavernLog = log; memory.removalRules = binding.removalRules || '';
+    return { memoryProtocol: 2, bindingId: binding.id, lines: memory.mochi, savedMemories: memory.savedMemories || [], timeContext: memory.timeContext || null };
 }
 
 
@@ -80,6 +122,7 @@ export function updateBindingSettings(state, input) {
     if (!binding) throw new Error('当前面具、角色或聊天记录与绑定不符，请刷新列表');
     if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100) throw new Error('同步范围须为1～100条整数');
     if (typeof input.auto !== 'boolean') throw new Error('自动同步设置无效');
+    applyOptions(binding, input);
     binding.limit = input.limit;
     binding.auto = input.auto;
     return binding;
@@ -154,4 +197,29 @@ export function acceptTavernBatch(state, input) {
         upload.result = result; return result;
     }
     throw new Error('未知的分批上传操作');
+}
+
+function applyOptions(binding, input) {
+    if (input.removalRules !== undefined) { parseRemovalRules(input.removalRules); binding.removalRules = input.removalRules; }
+    if (input.timeMode !== undefined) { if (!['story', 'reality', 'off'].includes(input.timeMode)) throw new Error('时间模式无效'); binding.timeMode = input.timeMode; }
+}
+function cleanTimeContext(value) {
+    if (!value || typeof value.enabled !== 'boolean' || typeof value.timeZone !== 'string') throw new Error('时间信息无效');
+    new Intl.DateTimeFormat('zh-CN', { timeZone: value.timeZone });
+    return { enabled: value.enabled, timeZone: value.timeZone, ...(Number.isFinite(value.lastOnlineAt) && value.lastOnlineAt > 0 && value.lastOnlineAt <= Date.now() + 60000 ? { lastOnlineAt: value.lastOnlineAt } : {}) };
+}
+export function resyncTavern(state, input, native = false) {
+    const binding = state.bindings.find(b => b.id === input.bindingId && (native ? tupleMatches(b,input) : tavernMatches(b,input)));
+    if (!binding) throw new Error('绑定已变化，请刷新后重试');
+    const memory = state.memories[binding.id]; if (!memory) return { count: 0 };
+    const log = memory.tavernLog || {};
+    for (const item of Object.values(log)) {
+        item.text = cleanStoryText(item.text, binding.removalRules || '');
+        item.revision = createHash('sha256').update(JSON.stringify([item.role,item.text])).digest('hex');
+        item.acknowledged = false; item.repair = true;
+    }
+    if (Object.values(log).reduce((n,l) => n+l.text.length,0) > 2000000) throw new Error('历史同步副本超过200万字符，暂不能整批重新同步；未改变旧数据');
+    memory.tavern = (memory.tavern || []).map(l => ({ ...l, text: cleanStoryText(l.text, binding.removalRules || '') }));
+    delete memory.lastTavernUploadId;
+    return { count: Object.keys(log).length };
 }

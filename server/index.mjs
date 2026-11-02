@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { cleanLines, validId, newBinding, exchange, publishTavern, tupleMatches, acknowledgeTavern, updateBindingSettings, acceptTavernBatch } from './core.mjs';
+import { cleanLines, validId, newBinding, exchange, publishTavern, tupleMatches, acknowledgeTavern, updateBindingSettings, acceptTavernBatch, resyncTavern } from './core.mjs';
 
 export const info = { id: 'mochi-bridge', name: 'Mochi 记忆互通（测试版）', description: '本机双向聊天记忆桥接；不修改角色卡、面具和世界书。' };
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -52,6 +52,7 @@ export async function init(router) {
     router.post('/binding-settings', async (req, res) => { try { res.json({ binding: await mutate(s => updateBindingSettings(s, req.body)) }); } catch (e) { res.status(400).json({ error: e.message }); } });
     router.post('/unbind', async (req, res) => { try { await mutate(s => { s.bindings = s.bindings.filter(b => b.id !== req.body.id); delete s.memories[req.body.id]; }); res.json({ ok: true }); } catch { res.status(500).json({ error: '解除绑定失败' }); } });
     router.post('/tavern-batch', async (req, res) => { try { res.json(await mutate(s => acceptTavernBatch(s, req.body))); } catch (e) { res.status(400).json({ error: e.message }); } });
+    router.post('/resync', async (req, res) => { try { res.json(await mutate(s => resyncTavern(s, req.body))); } catch (e) { res.status(400).json({ error: e.message }); } });
     router.post('/tavern', async (req, res) => { try { res.json(await mutate(s => publishTavern(s, req.body))); } catch (e) { res.status(400).json({ error: e.message }); } });
     // Separate loopback-only listener: native APK does not borrow the browser's ST session or disable ST CSRF.
     server = http.createServer(async (req, res) => {
@@ -73,6 +74,7 @@ export async function init(router) {
                 return reply(res, 200, { ok: true });
             }
             if (req.url === '/binding') return reply(res, 200, { binding: state.bindings.find(b => tupleMatches(b, body)) || null });
+            if (req.url === '/resync') return reply(res, 200, await mutate(s => resyncTavern(s, body, true)));
             if (req.url === '/ack') return reply(res, 200, await mutate(s => acknowledgeTavern(s, body)));
             if (req.url === '/exchange') return reply(res, 200, await mutate(s => exchange(s, body)));
             reply(res, 404, { error: '接口不存在' });

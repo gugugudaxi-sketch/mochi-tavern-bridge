@@ -47,3 +47,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === self) {
         console.log('Mochi 服务端已安装，已开启 enableServerPlugins。请重启酒馆，再打开扩展配对。');
     } catch (error) { console.error(`安装未完成：${error.message}`); process.exitCode = 1; }
 }
+

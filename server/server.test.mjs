@@ -53,6 +53,9 @@ test('实际本机HTTP：认证、配对、双向同步、持久化、解除绑�
         const afterSettings = JSON.parse(await fs.readFile(path.join(temporary, 'bridge-state.json'), 'utf8'));
         assert.deepEqual(afterSettings.memories, beforeSettings.memories);
         assert.equal((await call('/binding', identity)).data.binding.auto, false);
+        assert.equal((await admin('POST', '/resync', { ...binding, bindingId: binding.id })).code, 200);
+        assert.equal((await call('/resync', { ...identity, bindingId: binding.id })).data.count, 2);
+        assert.equal((await call('/resync', { ...identity, maskId: 'wrong', bindingId: binding.id })).code, 400);
         await admin('POST', '/unbind', { id: binding.id });
         assert.equal((await call('/binding', identity)).data.binding, null);
         assert.equal((await call('/exchange', { ...identity, bindingId: binding.id, lines })).code, 400);
