@@ -1,4 +1,4 @@
-import { user_avatar, extension_prompt_types } from '../../../../script.js';
+import { user_avatar, extension_prompt_types, selectCharacterById, openCharacterChat, getPastCharacterChats } from '../../../../script.js';
 
 function parseRemovalRules(value = '') {
     if (typeof value !== 'string' || value.length > 8000) throw new Error('清除格式最多8000字符');
@@ -44,6 +44,7 @@ let data = null;
 const clockContexts = new Map();
 const CLOCK = 'mochi-bridge-clock';
 let running = null;
+let openingBoundChat = false;
 let settingsDirty = false;
 let displayedBindingId = null;
 const context = () => SillyTavern.getContext();
@@ -151,6 +152,7 @@ async function refresh() {
     clearPrompt();
 }
 async function sync(manual = false) {
+    if (openingBoundChat) return;
     const requestedIdentity = identity();
     if (running) {
         await running.catch(() => {});
@@ -204,6 +206,27 @@ function injectClock(binding) {
         }
     }
     context().setExtensionPrompt(CLOCK, text, extension_prompt_types.IN_CHAT, 0, false);
+}
+
+async function openBoundChat(bindingId) {
+    const state = await api('/state');
+    const binding = state.bindings.find(item => item.id === bindingId);
+    if (!binding) throw new Error('找不到这个绑定，请回 Mochi 检查当前角色和面具');
+    const characterId = context().characters.findIndex(character => character.avatar === binding.avatar);
+    if (characterId < 0) throw new Error('绑定的酒馆角色已找不到');
+    const { getUserAvatars, setUserAvatar } = await import('../../../../scripts/personas.js');
+    const [chats, personas] = await Promise.all([getPastCharacterChats(characterId), getUserAvatars(false)]);
+    if (!chats.some(chat => chat.file_name === binding.chatId + '.jsonl')) throw new Error('绑定的酒馆存档已找不到，可能已改名或删除');
+    if (!personas.includes(binding.persona)) throw new Error('绑定的酒馆面具已找不到');
+    const current = context();
+    if (current.groupId || String(current.characterId) !== String(characterId)) {
+        await selectCharacterById(characterId, { switchMenu: false });
+    }
+    if (context().groupId || String(context().characterId) !== String(characterId)) throw new Error('当前无法切换酒馆角色，请在保存或生成结束后重试');
+    if (context().chatId !== binding.chatId) await openCharacterChat(binding.chatId);
+    if (user_avatar !== binding.persona) await setUserAvatar(binding.persona, { toastPersonaNameChange: false });
+    if (!same(identity(), binding)) throw new Error('未能切换到绑定的酒馆存档，请检查酒馆当前面具和聊天');
+    return binding;
 }
 
 async function setup() {
@@ -291,7 +314,7 @@ async function setup() {
     root.querySelector('[data-sync]').onclick = action(async () => { if (!currentBinding()) throw new Error('当前聊天未绑定'); await sync(true); });
     root.querySelector('[data-unbind]').onclick = action(async () => { const binding = currentBinding(); if (!binding) return; await api('/unbind', { id: binding.id }); clearPrompt(); await refresh(); status('已解除绑定；原始聊天保留，请在 Mochi 同步以清除旧互通记忆'); });
     const c = context();
-    const changed = () => { clearPrompt(); void refresh().then(() => sync()).catch(e => status(e.message)); };
+    const changed = () => { clearPrompt(); if (openingBoundChat) return; void refresh().then(() => sync()).catch(e => status(e.message)); };
     c.eventSource.on(c.eventTypes.CHAT_CHANGED, changed);
     c.eventSource.on(c.eventTypes.GENERATION_AFTER_COMMANDS, async (_type, _options, dryRun) => { if (!dryRun) {
         const binding = currentBinding(); injectClock(binding); await sync().catch(() => {});
@@ -308,7 +331,31 @@ async function setup() {
         if (next !== lastIdentity) { lastIdentity = next; changed(); return; }
         if (document.visibilityState !== 'hidden' && !(context().streamingProcessor && !context().streamingProcessor.isFinished) && currentBinding()?.auto) void sync().catch(() => {});
     }, 15000);
-    await refresh(); await sync();
+    const launchUrl = globalThis.location ? new URL(location.href) : null;
+    const launchId = launchUrl?.searchParams.get('mochiBinding');
+    if (launchId) {
+        openingBoundChat = true;
+        let handled = false;
+        c.eventSource.on(c.eventTypes.APP_READY, async () => {
+            if (handled) return;
+            handled = true;
+            try {
+                launchUrl.searchParams.delete('mochiBinding');
+                history.replaceState(history.state, '', launchUrl);
+                const binding = await openBoundChat(launchId);
+                await refresh();
+                status(`已打开绑定存档：${binding.label}`);
+                globalThis.toastr?.success('已打开绑定的酒馆存档');
+            } catch (error) {
+                status(error.message);
+                globalThis.toastr?.error(error.message);
+            } finally {
+                openingBoundChat = false;
+            }
+        });
+    }
+    await refresh();
+    if (!launchId) await sync();
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => void setup().catch(e => { status(e.message); }), { once: true });
 else void setup().catch(e => { status(e.message); });
